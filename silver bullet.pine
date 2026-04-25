@@ -1,0 +1,228 @@
+// ============================================================
+// ICT Silver Bullet Strategy — Pine Script V5
+// Multi-Timeframe (1m Execution + 15m HTF Filter)
+// Vaqt filtri: London / NY Morning / NY Afternoon (EST)
+// ============================================================
+//@version=5
+indicator("ICT Silver Bullet [MTF]", overlay=true, max_bars_back=500)
+
+// ─────────────────────────────────────────
+// ① INPUT SOZLAMALARI
+// ─────────────────────────────────────────
+show_fvg       = input.bool(true,  "FVG zonalarini ko'rsatish")
+show_signals   = input.bool(true,  "Entry signallarini ko'rsatish")
+rr_ratio       = input.float(2.0,  "Risk/Reward nisbati", step=0.1)
+fvg_color_bull = input.color(color.new(color.green, 80), "Bullish FVG rangi")
+fvg_color_bear = input.color(color.new(color.red,   80), "Bearish FVG rangi")
+
+// ─────────────────────────────────────────
+// ② VAQT FILTRI — New York EST
+//    London:       03:00–04:00
+//    NY Morning:   10:00–11:00
+//    NY Afternoon: 14:00–15:00
+// ─────────────────────────────────────────
+// TradingView timezone("America/New_York") bilan UTC-5/-4 hisoblanadi
+ny_hour = hour(time, "America/New_York")
+ny_min  = minute(time, "America/New_York")
+
+in_london    = (ny_hour == 3)
+in_ny_morn   = (ny_hour == 10)
+in_ny_aft    = (ny_hour == 14)
+in_session   = in_london or in_ny_morn or in_ny_aft
+
+session_label = in_london  ? "🇬🇧 London"      :
+               in_ny_morn ? "🗽 NY Morning"   :
+               in_ny_aft  ? "🌆 NY Afternoon" : ""
+
+// ─────────────────────────────────────────
+// ③ HTF FILTER — 15m Market Structure
+//    15m oxirgi High > oldingi High  → Bullish
+//    15m oxirgi Low  < oldingi Low   → Bearish
+// ─────────────────────────────────────────
+htf_high = request.security(syminfo.tickerid, "15", ta.highest(high, 3)[1], lookahead=barmerge.lookahead_off)
+htf_low  = request.security(syminfo.tickerid, "15", ta.lowest(low,  3)[1], lookahead=barmerge.lookahead_off)
+
+htf_high_prev = request.security(syminfo.tickerid, "15", ta.highest(high, 3)[4], lookahead=barmerge.lookahead_off)
+htf_low_prev  = request.security(syminfo.tickerid, "15", ta.lowest(low,  3)[4],  lookahead=barmerge.lookahead_off)
+
+htf_bullish = htf_high > htf_high_prev   // 15m yuqoriga ketayapti
+htf_bearish = htf_low  < htf_low_prev    // 15m pastga ketayapti
+
+// ─────────────────────────────────────────
+// ④ LIQUIDITY SWEEP ANIQLASH (1m)
+//    Narx 15m High yoki Low ni kesib o'tishi
+// ─────────────────────────────────────────
+swept_high = high > htf_high and high[1] <= htf_high  // Bearish sweep
+swept_low  = low  < htf_low  and low[1]  >= htf_low   // Bullish sweep
+
+// ─────────────────────────────────────────
+// ⑤ MARKET STRUCTURE SHIFT (MSS) — 1m
+//    Swing High/Low hisoblash
+// ─────────────────────────────────────────
+swing_len = 3  // Swing uchun shamlar soni
+
+swing_high = ta.pivothigh(high, swing_len, swing_len)
+swing_low  = ta.pivotlow(low,  swing_len, swing_len)
+
+// Oxirgi swing high/low saqlash
+var float last_swing_high = na
+var float last_swing_low  = na
+
+if not na(swing_high)
+    last_swing_high := swing_high
+if not na(swing_low)
+    last_swing_low  := swing_low
+
+// MSS: narx oxirgi swing nuqtani yoradi
+mss_bull = not na(last_swing_high) and close > last_swing_high and close[1] <= last_swing_high[1]
+mss_bear = not na(last_swing_low)  and close < last_swing_low  and close[1] >= last_swing_low[1]
+
+// ─────────────────────────────────────────
+// ⑥ FVG (Fair Value Gap) ANIQLASH — 1m
+//    3 shamlik FVG:
+//    Bullish: low[0] > high[2]
+//    Bearish: high[0] < low[2]
+// ─────────────────────────────────────────
+var float fvg_top    = na
+var float fvg_bottom = na
+var bool  fvg_bull   = false
+var bool  fvg_bear   = false
+var int   fvg_bar    = na
+
+// MSS dan keyin birinchi FVG saqlash uchun flag
+var bool wait_bull_fvg = false
+var bool wait_bear_fvg = false
+
+// MSS bo'lganda kutish rejimini yoqish
+if mss_bull and htf_bullish
+    wait_bull_fvg := true
+    wait_bear_fvg := false
+if mss_bear and htf_bearish
+    wait_bear_fvg := true
+    wait_bull_fvg := false
+
+// Bullish FVG aniqlash
+bull_fvg_cond = low > high[2] and wait_bull_fvg
+// Bearish FVG aniqlash
+bear_fvg_cond = high < low[2] and wait_bear_fvg
+
+if bull_fvg_cond
+    fvg_top    := low           // FVG yuqori chegarasi = hozirgi sham Low
+    fvg_bottom := high[2]       // FVG pastki chegarasi = 2 sham oldingi High
+    fvg_bull   := true
+    fvg_bear   := false
+    fvg_bar    := bar_index
+    wait_bull_fvg := false      // Birinchi FVG topildi, kutishni to'xtat
+
+if bear_fvg_cond
+    fvg_top    := low[2]        // FVG yuqori chegarasi = 2 sham oldingi Low
+    fvg_bottom := high          // FVG pastki chegarasi = hozirgi sham High
+    fvg_bull   := false
+    fvg_bear   := true
+    fvg_bar    := bar_index
+    wait_bear_fvg := false
+
+// ─────────────────────────────────────────
+// ⑦ ENTRY SHARTI
+//    Narx FVG zonasiga qaytganda (retrace)
+// ─────────────────────────────────────────
+in_bull_fvg = fvg_bull and low <= fvg_top    and high >= fvg_bottom
+in_bear_fvg = fvg_bear and high >= fvg_bottom and low  <= fvg_top
+
+// Entry signallari (faqat sessiya vaqtida)
+long_entry  = in_session and htf_bullish and in_bull_fvg
+short_entry = in_session and htf_bearish and in_bear_fvg
+
+// ─────────────────────────────────────────
+// ⑧ STOP LOSS VA TAKE PROFIT HISOBLASH
+// ─────────────────────────────────────────
+var float sl_price = na
+var float tp_price = na
+
+if long_entry
+    sl_price := fvg_bottom - (fvg_top - fvg_bottom) * 0.1   // FVG pastidan biroz past
+    tp_price := close + (close - sl_price) * rr_ratio         // 1:2 RR
+
+if short_entry
+    sl_price := fvg_top + (fvg_top - fvg_bottom) * 0.1       // FVG yuqorisidan biroz yuqori
+    tp_price := close - (sl_price - close) * rr_ratio         // 1:2 RR
+
+// ─────────────────────────────────────────
+// ⑨ VIZUAL — FVG ZONASI CHIZISH
+// ─────────────────────────────────────────
+// Har bir yangi FVG uchun box chizish
+var box fvg_box = na
+
+if (bull_fvg_cond or bear_fvg_cond) and show_fvg
+    fvg_box := box.new(
+         left   = bar_index - 2,
+         top    = fvg_top,
+         right  = bar_index + 20,
+         bottom = fvg_bottom,
+         border_color = fvg_bull ? color.green : color.red,
+         border_width = 1,
+         bgcolor      = fvg_bull ? fvg_color_bull : fvg_color_bear
+    )
+
+// ─────────────────────────────────────────
+// ⑩ SIGNAL BELGILARI
+// ─────────────────────────────────────────
+if show_signals
+    if long_entry
+        label.new(bar_index, low,
+             text  = "▲ LONG\n" + session_label,
+             color = color.green,
+             textcolor = color.white,
+             style = label.style_label_up,
+             size  = size.normal)
+
+    if short_entry
+        label.new(bar_index, high,
+             text  = "▼ SHORT\n" + session_label,
+             color = color.red,
+             textcolor = color.white,
+             style = label.style_label_down,
+             size  = size.normal)
+
+// ─────────────────────────────────────────
+// ⑪ SL / TP LINIYALARI
+// ─────────────────────────────────────────
+plot(long_entry or short_entry ? sl_price : na,
+     title="Stop Loss", color=color.red,   style=plot.style_linebr, linewidth=1)
+plot(long_entry or short_entry ? tp_price : na,
+     title="Take Profit", color=color.green, style=plot.style_linebr, linewidth=1)
+
+// ─────────────────────────────────────────
+// ⑫ HTF TREND BELGISI (ekran burchagida)
+// ─────────────────────────────────────────
+var table trend_tbl = table.new(position.top_right, 2, 2,
+     border_color=color.gray, border_width=1)
+
+if barstate.islast
+    table.cell(trend_tbl, 0, 0, "15m Trend",
+         text_color=color.white, bgcolor=color.gray)
+    table.cell(trend_tbl, 1, 0,
+         htf_bullish ? "⬆ BULL" : htf_bearish ? "⬇ BEAR" : "↔ NEYTRAL",
+         text_color = htf_bullish ? color.green : htf_bearish ? color.red : color.yellow,
+         bgcolor    = color.new(color.black, 30))
+    table.cell(trend_tbl, 0, 1, "Sessiya",
+         text_color=color.white, bgcolor=color.gray)
+    table.cell(trend_tbl, 1, 1,
+         in_session ? session_label : "⏸ Yopiq",
+         text_color = in_session ? color.yellow : color.gray,
+         bgcolor    = color.new(color.black, 30))
+
+// ─────────────────────────────────────────
+// ⑬ ALERTLAR (Webhook uchun JSON format)
+// ─────────────────────────────────────────
+alertcondition(long_entry,
+     title   = "🟢 Silver Bullet LONG Signal",
+     message = '{"type":"LONG","symbol":"{{ticker}}","timeframe":"{{interval}}","price":"{{close}}","session":"{{plot_0}}","time":"{{time}}"}')
+
+alertcondition(short_entry,
+     title   = "🔴 Silver Bullet SHORT Signal",
+     message = '{"type":"SHORT","symbol":"{{ticker}}","timeframe":"{{interval}}","price":"{{close}}","session":"{{plot_0}}","time":"{{time}}"}')
+
+alertcondition(long_entry or short_entry,
+     title   = "⚡ Silver Bullet Signal (Har ikkisi)",
+     message = '{"type":"{{plot_0}}","symbol":"{{ticker}}","price":"{{close}}","time":"{{time}}","sl":"{{plot_1}}","tp":"{{plot_2}}"}')
